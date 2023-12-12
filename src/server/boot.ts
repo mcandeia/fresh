@@ -1,6 +1,6 @@
 import { DENO_DEPLOYMENT_ID } from "./build_id.ts";
 import { colors } from "./deps.ts";
-import { ServeHandler } from "./types.ts";
+import { ServeHandler, StartOptions } from "./types.ts";
 
 export async function startServer(
   handler: Deno.ServeHandler,
@@ -68,25 +68,11 @@ export async function startServer(
   }
 }
 
-async function bootServer(
-  handler: ServeHandler,
-  opts: Partial<Deno.ServeTlsOptions>,
-) {
+async function bootServer(handler: ServeHandler, opts: StartOptions) {
   // @ts-ignore Ignore type error when type checking with Deno versions
   if (typeof Deno.serve === "function") {
     // @ts-ignore Ignore type error when type checking with Deno versions
-    await Deno.serve(
-      opts,
-      (r, { remoteAddr }) =>
-        handler(r, {
-          remoteAddr,
-          localAddr: {
-            transport: "tcp",
-            hostname: opts.hostname ?? "localhost",
-            port: opts.port,
-          } as Deno.NetAddr,
-        }),
-    ).finished;
+    await Deno.serve(opts, handler).finished;
   } else {
     // @ts-ignore Deprecated std serve way
     await serve(handler, opts);
