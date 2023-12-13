@@ -1,3 +1,5 @@
+/** @jsxImportSource preact */
+
 export default function DefaultErrorPage() {
   return (
     <div class="frsh-error-page">
