@@ -97,7 +97,7 @@ export class EsbuildBuilder implements Builder {
         plugins: [
           devClientUrlPlugin(opts.basePath),
           buildIdPlugin(opts.buildID),
-          ...denoPlugins({ configPath: opts.configPath }),
+          ...denoPlugins({ configPath: opts.configPath, loader: "portable" }),
         ],
       });
 
