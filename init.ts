@@ -2,9 +2,11 @@ import { basename, colors, join, parse, resolve } from "./src/dev/deps.ts";
 import { error } from "./src/dev/error.ts";
 import { collect, ensureMinDenoVersion, generate } from "./src/dev/mod.ts";
 import {
+  AOT_GH_ACTION,
   dotenvImports,
   freshImports,
   tailwindImports,
+  twindImports,
 } from "./src/dev/imports.ts";
 
 ensureMinDenoVersion();
@@ -25,22 +27,26 @@ USAGE:
 
 OPTIONS:
     --force   Overwrite existing files
-    --tailwind   Setup project to use 'tailwind' for styling
-    --vscode  Setup project for VSCode
+    --tailwind   Use Tailwind for styling
+    --twind   Use Twind for styling
+    --vscode  Setup project for VS Code
     --docker  Setup Project to use Docker
 `;
 
 const CONFIRM_EMPTY_MESSAGE =
   "The target directory is not empty (files could get overwritten). Do you want to continue anyway?";
 
-const USE_TAILWIND_MESSAGE =
-  "Fresh has built in support for styling using Tailwind CSS. Do you want to use this?";
-
 const USE_VSCODE_MESSAGE = "Do you use VS Code?";
 
 const flags = parse(Deno.args, {
-  boolean: ["force", "tailwind", "vscode", "docker", "help"],
-  default: { "force": null, "tailwind": null, "vscode": null, "docker": null },
+  boolean: ["force", "tailwind", "twind", "vscode", "docker", "help"],
+  default: {
+    force: null,
+    tailwind: null,
+    twind: null,
+    vscode: null,
+    docker: null,
+  },
   alias: {
     help: "h",
   },
@@ -49,6 +55,10 @@ const flags = parse(Deno.args, {
 if (flags.help) {
   console.log(help);
   Deno.exit(0);
+}
+
+if (flags.tailwind && flags.twind) {
+  error("Cannot use Tailwind and Twind at the same time.");
 }
 
 console.log();
@@ -62,7 +72,7 @@ console.log();
 
 let unresolvedDirectory = Deno.args[0];
 if (flags._.length !== 1) {
-  const userInput = prompt("Project Name", "fresh-project");
+  const userInput = prompt("Project Name:", "fresh-project");
   if (!userInput) {
     error(help);
   }
@@ -89,9 +99,26 @@ try {
 }
 console.log("%cLet's set up your new Fresh project.\n", "font-weight: bold");
 
-const useTailwind = flags.tailwind === null
-  ? confirm(USE_TAILWIND_MESSAGE)
-  : flags.tailwind;
+let useTailwind = flags.tailwind || false;
+let useTwind = flags.twind || false;
+
+if (flags.tailwind == null && flags.twind == null) {
+  if (confirm("Do you want to use a styling library?")) {
+    console.log();
+    console.log(`1. ${colors.cyan("tailwindcss")} (recommended)`);
+    console.log(`2. ${colors.cyan("Twind")}`);
+    console.log();
+    switch (
+      (prompt("Which styling library do you want to use? [1]") || "1").trim()
+    ) {
+      case "2":
+        useTwind = true;
+        break;
+      default:
+        useTailwind = true;
+    }
+  }
+}
 
 const useVSCode = flags.vscode === null
   ? confirm(USE_VSCODE_MESSAGE)
@@ -313,6 +340,30 @@ if (useTailwind) {
     join(resolvedDirectory, "tailwind.config.ts"),
     TAILWIND_CONFIG_TS,
   );
+  const ghWorkflowDir = join(resolvedDirectory, ".github", "workflows");
+  await Deno.mkdir(ghWorkflowDir, { recursive: true });
+  await Deno.writeTextFile(
+    join(ghWorkflowDir, "deploy.yml"),
+    AOT_GH_ACTION,
+  );
+}
+
+const TWIND_CONFIG_TS = `import { defineConfig, Preset } from "@twind/core";
+import presetTailwind from "@twind/preset-tailwind";
+import presetAutoprefix from "@twind/preset-autoprefix";
+
+export default {
+  ...defineConfig({
+    presets: [presetTailwind() as Preset, presetAutoprefix() as Preset],
+  }),
+  selfURL: import.meta.url,
+};
+`;
+if (useTwind) {
+  await Deno.writeTextFile(
+    join(resolvedDirectory, "twind.config.ts"),
+    TWIND_CONFIG_TS,
+  );
 }
 
 const NO_TAILWIND_STYLES = `
@@ -454,7 +505,7 @@ export default function App({ Component }: PageProps) {
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
         <title>${basename(resolvedDirectory)}</title>
-        <link rel="stylesheet" href="/styles.css" />
+        ${useTwind ? "" : `<link rel="stylesheet" href="/styles.css" />`}
       </head>
       <body>
         <Component />
@@ -474,10 +525,12 @@ const TAILWIND_CSS = `@tailwind base;
 @tailwind utilities;`;
 
 const cssStyles = useTailwind ? TAILWIND_CSS : NO_TAILWIND_STYLES;
-await Deno.writeTextFile(
-  join(resolvedDirectory, "static", "styles.css"),
-  cssStyles,
-);
+if (!useTwind) {
+  await Deno.writeTextFile(
+    join(resolvedDirectory, "static", "styles.css"),
+    cssStyles,
+  );
+}
 
 const STATIC_LOGO =
   `<svg width="40" height="40" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -508,10 +561,19 @@ if (useTailwind) {
   FRESH_CONFIG_TS += `import tailwind from "$fresh/plugins/tailwind.ts";
 `;
 }
+if (useTwind) {
+  FRESH_CONFIG_TS += `import twind from "$fresh/plugins/twindv1.ts";
+import twindConfig from "./twind.config.ts";
+`;
+}
 
 FRESH_CONFIG_TS += `
 export default defineConfig({${
-  useTailwind ? `\n  plugins: [tailwind()],\n` : ""
+  useTailwind
+    ? `\n  plugins: [tailwind()],\n`
+    : useTwind
+    ? `\n  plugins: [twind(twindConfig)],\n`
+    : ""
 }});
 `;
 const CONFIG_TS_PATH = join(resolvedDirectory, "fresh.config.ts");
@@ -584,6 +646,9 @@ if (useTailwind) {
   // TODO: Have a better deno config type
   // deno-lint-ignore no-explicit-any
   (config as any).nodeModulesDir = true;
+}
+if (useTwind) {
+  twindImports(config.imports);
 }
 dotenvImports(config.imports);
 
@@ -658,62 +723,70 @@ if (useVSCode) {
   );
 }
 
-const TAILWIND_CUSTOMDATA = `{
+const tailwindCustomData = {
   "version": 1.1,
   "atDirectives": [
     {
       "name": "@tailwind",
-      "description": "Use the \`@tailwind\` directive to insert Tailwind's \`base\`, \`components\`, \`utilities\` and \`screens\` styles into your CSS.",
+      "description":
+        "Use the `@tailwind` directive to insert Tailwind's `base`, `components`, `utilities` and `screens` styles into your CSS.",
       "references": [
         {
           "name": "Tailwind Documentation",
-          "url": "https://tailwindcss.com/docs/functions-and-directives#tailwind"
-        }
-      ]
+          "url":
+            "https://tailwindcss.com/docs/functions-and-directives#tailwind",
+        },
+      ],
     },
     {
       "name": "@apply",
-      "description": "Use the \`@apply\` directive to inline any existing utility classes into your own custom CSS. This is useful when you find a common utility pattern in your HTML that you’d like to extract to a new component.",
+      "description":
+        "Use the `@apply` directive to inline any existing utility classes into your own custom CSS. This is useful when you find a common utility pattern in your HTML that you’d like to extract to a new component.",
       "references": [
         {
           "name": "Tailwind Documentation",
-          "url": "https://tailwindcss.com/docs/functions-and-directives#apply"
-        }
-      ]
+          "url": "https://tailwindcss.com/docs/functions-and-directives#apply",
+        },
+      ],
     },
     {
       "name": "@responsive",
-      "description": "You can generate responsive variants of your own classes by wrapping their definitions in the \`@responsive\` directive:\\n\`\`\`css\n@responsive {\\n  .alert {\n    background-color: #E53E3E;\\n  }\\n}\\n\`\`\`\\n",
+      "description":
+        "You can generate responsive variants of your own classes by wrapping their definitions in the `@responsive` directive:\n```css\n@responsive {\n  .alert {\n    background-color: #E53E3E;\n  }\n}\n```\n",
       "references": [
         {
           "name": "Tailwind Documentation",
-          "url": "https://tailwindcss.com/docs/functions-and-directives#responsive"
-        }
-      ]
+          "url":
+            "https://tailwindcss.com/docs/functions-and-directives#responsive",
+        },
+      ],
     },
     {
       "name": "@screen",
-      "description": "The \`@screen\` directive allows you to create media queries that reference your breakpoints by **name** instead of duplicating their values in your own CSS:\\n\`\`\`css\n@screen sm {\\n  /* ... */\\n}\\n\`\`\`\\n…gets transformed into this:\\n\`\`\`css\n@media (min-width: 640px) {\\n  /* ... */\\n}\\n\`\`\`\\n",
+      "description":
+        "The `@screen` directive allows you to create media queries that reference your breakpoints by **name** instead of duplicating their values in your own CSS:\n```css\n@screen sm {\n  /* ... */\n}\n```\n…gets transformed into this:\n```css\n@media (min-width: 640px) {\n  /* ... */\n}\n```\n",
       "references": [
         {
           "name": "Tailwind Documentation",
-          "url": "https://tailwindcss.com/docs/functions-and-directives#screen"
-        }
-      ]
+          "url": "https://tailwindcss.com/docs/functions-and-directives#screen",
+        },
+      ],
     },
     {
       "name": "@variants",
-      "description": "Generate \`hover\`, \`focus\`, \`active\` and other **variants** of your own utilities by wrapping their definitions in the \`@variants\` directive:\\n\`\`\`css\n@variants hover, focus {\\n   .btn-brand {\\n    background-color: #3182CE;\\n  }\\n}\\n\`\`\`\\n",
+      "description":
+        "Generate `hover`, `focus`, `active` and other **variants** of your own utilities by wrapping their definitions in the `@variants` directive:\n```css\n@variants hover, focus {\n   .btn-brand {\n    background-color: #3182CE;\n  }\n}\n```\n",
       "references": [
         {
           "name": "Tailwind Documentation",
-          "url": "https://tailwindcss.com/docs/functions-and-directives#variants"
-        }
-      ]
-    }
-  ]
-}
-`;
+          "url":
+            "https://tailwindcss.com/docs/functions-and-directives#variants",
+        },
+      ],
+    },
+  ],
+};
+const TAILWIND_CUSTOMDATA = JSON.stringify(tailwindCustomData, null, 2) + "\n";
 
 if (useVSCode && useTailwind) {
   await Deno.writeTextFile(

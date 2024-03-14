@@ -232,7 +232,7 @@ Deno.test("redirect /pages/fresh/ to /pages/fresh", async () => {
   );
 });
 
-Deno.test("redirect /pages/////fresh///// to /pages/////fresh", async () => {
+Deno.test("redirect /pages/////fresh///// to /pages/fresh", async () => {
   const resp = await handler(
     new Request("https://fresh.deno.dev/pages/////fresh/////"),
   );
@@ -240,11 +240,11 @@ Deno.test("redirect /pages/////fresh///// to /pages/////fresh", async () => {
   assertEquals(resp.status, STATUS_CODE.TemporaryRedirect);
   assertEquals(
     resp.headers.get("location"),
-    "/pages/////fresh",
+    "/pages/fresh",
   );
 });
 
-Deno.test("redirect /pages/////fresh/ to /pages/////fresh", async () => {
+Deno.test("redirect /pages/////fresh/ to /pages/fresh", async () => {
   const resp = await handler(
     new Request("https://fresh.deno.dev/pages/////fresh/"),
   );
@@ -252,7 +252,7 @@ Deno.test("redirect /pages/////fresh/ to /pages/////fresh", async () => {
   assertEquals(resp.status, STATUS_CODE.TemporaryRedirect);
   assertEquals(
     resp.headers.get("location"),
-    "/pages/////fresh",
+    "/pages/fresh",
   );
 });
 
@@ -262,6 +262,51 @@ Deno.test("no redirect for /pages/////fresh", async () => {
   );
   assert(resp);
   assertEquals(resp.status, STATUS_CODE.NotFound);
+});
+
+Deno.test("no open redirect when passing double slashes", async () => {
+  const resp = await handler(
+    new Request("https://fresh.deno.dev//evil.com/"),
+  );
+  assert(resp);
+  assertEquals(resp.status, STATUS_CODE.TemporaryRedirect);
+  assertEquals(resp.headers.get("location"), "/evil.com");
+});
+
+Deno.test("ctx.redirect() - relative urls", async () => {
+  let resp = await handler(
+    new Request("https://fresh.deno.dev/redirect?path=//evil.com/"),
+  );
+  assertEquals(resp.status, 302);
+  assertEquals(resp.headers.get("location"), "/evil.com/");
+
+  resp = await handler(
+    new Request(
+      "https://fresh.deno.dev/redirect?path=//evil.com//foo&status=307",
+    ),
+  );
+  assertEquals(resp.status, 307);
+  assertEquals(resp.headers.get("location"), "/evil.com/foo");
+});
+
+Deno.test("ctx.redirect() - absolute urls", async () => {
+  const resp = await handler(
+    new Request("https://fresh.deno.dev/redirect?path=https://example.com/"),
+  );
+  assertEquals(resp.status, 302);
+  assertEquals(resp.headers.get("location"), "https://example.com/");
+});
+
+Deno.test("ctx.redirect() - with search and hash", async () => {
+  const resp = await handler(
+    new Request(
+      `https://fresh.deno.dev/redirect?path=${
+        encodeURIComponent("/foo/bar?baz=123#foo")
+      }`,
+    ),
+  );
+  assertEquals(resp.status, 302);
+  assertEquals(resp.headers.get("location"), "/foo/bar?baz=123#foo");
 });
 
 Deno.test("/failure", async () => {
@@ -949,7 +994,7 @@ Deno.test("Adds nonce to inline scripts", async () => {
   await withFakeServe("./tests/fixture/main.ts", async (server) => {
     const doc = await server.getHtml(`/nonce_inline`);
 
-    const stateScript = doc.querySelector("#__FRSH_STATE")!;
+    const stateScript = doc.querySelector("[id^=__FRSH_STATE]")!;
     const nonce = stateScript.getAttribute("nonce")!;
 
     const el = doc.querySelector("#inline-script")!;
@@ -1160,6 +1205,7 @@ Deno.test("Expose config in ctx", async () => {
       next: "Function",
       render: "AsyncFunction",
       renderNotFound: "AsyncFunction",
+      redirect: "Function",
       localAddr: "<undefined>",
       pattern: "/ctx_config",
       data: "<undefined>",
@@ -1218,5 +1264,20 @@ Deno.test("empty string fallback for optional params", async () => {
     const doc = await server.getHtml(`/std/foo`);
     const data = JSON.parse(doc.querySelector("pre")?.textContent!);
     assertEquals(data, { path: "foo", version: "" });
+  });
+});
+
+// See https://github.com/denoland/fresh/issues/2254
+Deno.test("should not be able to override __FRSH_STATE", async () => {
+  await withPageName("./tests/fixture/main.ts", async (page, address) => {
+    let didError = false;
+    page.on("pageerror", (ev) => {
+      didError = true;
+      console.log(ev);
+    });
+    await page.goto(`${address}/spoof_state`);
+    await page.waitForSelector(".raw_ready");
+
+    assert(!didError);
   });
 });

@@ -1,4 +1,4 @@
-import { contentType, extname, SEP, STATUS_CODE } from "./deps.ts";
+import { contentType, extname, SEPARATOR, STATUS_CODE } from "./deps.ts";
 import * as router from "./router.ts";
 import { FreshConfig, FreshContext, Manifest } from "./mod.ts";
 import {
@@ -7,7 +7,7 @@ import {
   DEV_ERROR_OVERLAY_URL,
   JS_PREFIX,
 } from "./constants.ts";
-import { BUILD_ID } from "./build_id.ts";
+import { BUILD_ID, DENO_DEPLOYMENT_ID } from "./build_id.ts";
 
 import {
   ErrorPage,
@@ -44,6 +44,7 @@ import { loadAotSnapshot } from "../build/aot_snapshot.ts";
 import { ErrorOverlay } from "./error_overlay.tsx";
 import { withBase } from "./router.ts";
 import { PARTIAL_SEARCH_PARAM } from "../constants.ts";
+import TailwindErrorPage from "./tailwind_aot_error_page.tsx";
 
 const DEFAULT_CONN_INFO: ServeHandlerInfo = {
   localAddr: { transport: "tcp", hostname: "localhost", port: 8080 },
@@ -84,7 +85,10 @@ export async function getServerContext(state: InternalFreshState) {
   let snapshot: Builder | BuildSnapshot | Promise<BuildSnapshot> | null = null;
   if (state.loadSnapshot) {
     const loadedSnapshot = await loadAotSnapshot(config);
-    if (loadedSnapshot !== null) snapshot = loadedSnapshot;
+    if (loadedSnapshot !== null) {
+      snapshot = loadedSnapshot;
+      state.didLoadSnapshot = true;
+    }
   }
 
   const finalSnapshot = snapshot ?? new EsbuildBuilder({
@@ -108,6 +112,31 @@ export async function getServerContext(state: InternalFreshState) {
     extractResult,
     finalSnapshot,
   );
+}
+
+function redirectTo(pathOrUrl: string = "/", status = 302): Response {
+  let location = pathOrUrl;
+
+  // Disallow protocol relative URLs
+  if (pathOrUrl !== "/" && pathOrUrl.startsWith("/")) {
+    let idx = pathOrUrl.indexOf("?");
+    if (idx === -1) {
+      idx = pathOrUrl.indexOf("#");
+    }
+
+    const pathname = idx > -1 ? pathOrUrl.slice(0, idx) : pathOrUrl;
+    const search = idx > -1 ? pathOrUrl.slice(idx) : "";
+
+    // Remove double slashes to prevent open redirect vulnerability.
+    location = `${pathname.replaceAll(/\/+/g, "/")}${search}`;
+  }
+
+  return new Response(null, {
+    status,
+    headers: {
+      location,
+    },
+  });
 }
 
 export class ServerContext {
@@ -183,6 +212,11 @@ export class ServerContext {
       connInfo: ServeHandlerInfo = DEFAULT_CONN_INFO,
     ) {
       const url = new URL(req.url);
+      // Syntactically having double slashes in the pathname is valid per
+      // spec, but there is no behavior defined for that. Practically all
+      // servers normalize the pathname of a URL to not include double
+      // forward slashes.
+      url.pathname = url.pathname.replaceAll(/\/+/g, "/");
 
       const aliveUrl = basePath + ALIVE_URL;
 
@@ -274,6 +308,7 @@ export class ServerContext {
           ctx.data = data;
           return await renderNotFound(req, ctx);
         },
+        redirect: redirectTo,
         route: "",
         get pattern() {
           return ctx.route;
@@ -323,7 +358,7 @@ export class ServerContext {
   } {
     const internalRoutes: router.Routes = {};
     const staticRoutes: router.Routes = {};
-    const routes: router.Routes = {};
+    let routes: router.Routes = {};
 
     const assetRoute = withBase(
       `${INTERNAL_PREFIX}${JS_PREFIX}/${BUILD_ID}/:path*`,
@@ -344,7 +379,7 @@ export class ServerContext {
       const { localUrl, path, size, contentType, etag } of this.#extractResult
         .staticFiles
     ) {
-      staticRoutes[path.replaceAll(SEP, "/")] = {
+      staticRoutes[path.replaceAll(SEPARATOR, "/")] = {
         baseRoute: toBaseRoute(path),
         methods: {
           "HEAD": this.#staticFileHandler(
@@ -455,7 +490,7 @@ export class ServerContext {
       }
     }
 
-    const otherHandler: router.Handler = (req, ctx) => {
+    let otherHandler: router.Handler = (req, ctx) => {
       ctx.render = (data) => {
         ctx.data = data;
         return renderNotFound(req, ctx);
@@ -540,6 +575,51 @@ export class ServerContext {
       };
     }
 
+    // This page is shown when the user uses the tailwindcss plugin and
+    // hasn't configured AOT builds.
+    if (
+      !this.#state.config.dev &&
+      this.#state.loadSnapshot && !this.#state.didLoadSnapshot &&
+      this.#state.config.plugins.some((plugin) => plugin.name === "tailwind")
+    ) {
+      if (DENO_DEPLOYMENT_ID !== undefined) {
+        // Don't fail hard here and instead rewrite all routes to a special
+        // error route. Otherwise the first user experience of deploying a
+        // Fresh project would be pretty disruptive
+        console.error(
+          "%cError: Ahead of time builds not configured but required by the tailwindcss plugin.\nTo resolve this error, set up ahead of time builds: https://fresh.deno.dev/docs/concepts/ahead-of-time-builds",
+          "color: red",
+        );
+        console.log();
+
+        // Clear all routes so that everything redirects to the tailwind
+        // error page.
+        routes = {};
+
+        const freshErrorPage = genRender({
+          appWrapper: false,
+          inheritLayouts: false,
+          component: TailwindErrorPage,
+          csp: false,
+          name: "tailwind_error_route",
+          pattern: "*",
+          url: "",
+          baseRoute: toBaseRoute("*"),
+          handler: (_req: Request, ctx: FreshContext) => ctx.render(),
+        }, STATUS_CODE.InternalServerError);
+        otherHandler = (req, ctx) => {
+          const render = freshErrorPage(req, ctx);
+          return render();
+        };
+      } else {
+        // Not on Deno Deploy. The user likely forgot to run `deno task build`
+        console.warn(
+          '%cNo pre-compiled tailwind styles found.\n\nDid you forget to run "deno task build" prior to starting the production server?',
+          "color: yellow",
+        );
+      }
+    }
+
     return { internalRoutes, staticRoutes, routes, otherHandler, errorHandler };
   }
 
@@ -555,12 +635,7 @@ export class ServerContext {
       if (key !== null && BUILD_ID !== key) {
         url.searchParams.delete(ASSET_CACHE_BUST_KEY);
         const location = url.pathname + url.search;
-        return new Response(null, {
-          status: 307,
-          headers: {
-            location,
-          },
-        });
+        return redirectTo(location, 307);
       }
       const headers = new Headers({
         "content-type": contentType,
@@ -620,7 +695,7 @@ const createRenderNotFound = (
   return async (req, ctx) => {
     const notFound = extractResult.notFound;
     if (!notFound.component) {
-      return sendResponse(["Not found.", undefined], {
+      return sendResponse(["Not found.", "", undefined], {
         status: STATUS_CODE.NotFound,
         isDev: dev,
         statusText: undefined,
@@ -722,7 +797,7 @@ function collectEntrypoints(
 }
 
 function sendResponse(
-  resp: [string, ContentSecurityPolicy | undefined],
+  resp: [string, string, ContentSecurityPolicy | undefined],
   options: {
     status: number;
     statusText: string | undefined;
@@ -730,11 +805,12 @@ function sendResponse(
     isDev: boolean;
   },
 ) {
-  const headers: Record<string, string> = {
+  const [body, uuid, csp] = resp;
+  const headers: Headers = new Headers({
     "content-type": "text/html; charset=utf-8",
-  };
+    "x-fresh-uuid": uuid,
+  });
 
-  const [body, csp] = resp;
   if (csp) {
     if (options.isDev) {
       csp.directives.connectSrc = [
@@ -744,24 +820,25 @@ function sendResponse(
     }
     const directive = serializeCSPDirectives(csp.directives);
     if (csp.reportOnly) {
-      headers["content-security-policy-report-only"] = directive;
+      headers.set("content-security-policy-report-only", directive);
     } else {
-      headers["content-security-policy"] = directive;
+      headers.set("content-security-policy", directive);
     }
   }
 
   if (options.headers) {
     if (Array.isArray(options.headers)) {
-      for (let i = 0; i < options.headers.length; i++) {
-        const item = options.headers[i];
-        headers[item[0]] = item[1];
+      for (const [key, value] of options.headers) {
+        headers.append(key, value);
       }
     } else if (options.headers instanceof Headers) {
       options.headers.forEach((value, key) => {
-        headers[key] = value;
+        headers.append(key, value);
       });
     } else {
-      Object.assign(headers, options.headers);
+      for (const [key, value] of Object.entries(options.headers)) {
+        headers.append(key, value);
+      }
     }
   }
 
